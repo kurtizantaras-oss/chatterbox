@@ -140,7 +140,7 @@ def get_or_load_model():
     if MODEL is None:
         print("Model not loaded, initializing...")
         try:
-            MODEL = ChatterboxMultilingualTTS.from_pretrained(DEVICE)
+            MODEL = ChatterboxMultilingualTTS.from_local("./trained_lv/", device=DEVICE)
             if hasattr(MODEL, 'to') and str(MODEL.device) != DEVICE:
                 MODEL.to(DEVICE)
             print(f"Model loaded successfully. Internal device: {getattr(MODEL, 'device', 'N/A')}")
@@ -228,13 +228,13 @@ def generate_tts_audio(
     else:
         print("No audio prompt provided; using default voice.")
         
-    wav = current_model.generate(
+    wav, sample_rate = current_model.generate(
         text_input[:300],  # Truncate text to max chars
         language_id=language_id,
         **generate_kwargs
     )
     print("Audio generation complete.")
-    return (current_model.sr, wav.squeeze(0).numpy())
+    return (sample_rate, wav)
 
 with gr.Blocks() as demo:
     gr.Markdown(
@@ -314,4 +314,4 @@ with gr.Blocks() as demo:
         outputs=[audio_output],
     )
 
-demo.launch(mcp_server=True)
+demo.launch(server_name="0.0.0.0", server_port=7861, share=True)
