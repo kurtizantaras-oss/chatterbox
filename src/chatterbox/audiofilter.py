@@ -38,7 +38,7 @@ def trim_audio_with_pauses(wav_numpy, add_sylense=True, sr=16000):
     wav_tensor = torch.from_numpy(wav_numpy)
 
     # 4. Обнаружение временных меток речи
-    print("3. Обнаружение речи...")
+    print("Try to detect speech...")
     speech_timestamps = get_speech_timestamps(wav_tensor,
                                               modelvad,
                                               sampling_rate=sr,
@@ -52,7 +52,7 @@ def trim_audio_with_pauses(wav_numpy, add_sylense=True, sr=16000):
 
     # 5. Проверка результата VAD
     if not speech_timestamps:
-        print("  Активная речь не обнаружена. Возвращаем исходный файл.")
+        print("Speech is not in audio. Return original.")
         # ⚠️ Возвращается пустой массив нулей, а не исходный файл.
         return wav_numpy
 
@@ -87,7 +87,7 @@ def trim_audio_with_pauses(wav_numpy, add_sylense=True, sr=16000):
     # 12. Возврат обработанного аудио
     return final_audio_numpy
     
-def normalize_peak_numpy(self, data: np.ndarray, coefficient: float = 1.0) -> np.ndarray:
+def normalize_peak_numpy(data: np.ndarray, coefficient: float = 1.0) -> np.ndarray:
     """
     Нормализует аудио (NumPy) по максимальному пику.
     """
@@ -98,7 +98,7 @@ def normalize_peak_numpy(self, data: np.ndarray, coefficient: float = 1.0) -> np
         data = data / max_value
     return data * coefficient
     
-def resample_wav(self, audio: np.ndarray, audio_sr: int, target_sr: int) -> np.ndarray:
+def resample_wav(audio: np.ndarray, audio_sr: int, target_sr: int=16000) -> np.ndarray:
     """
     Изменяет частоту дискретизации аудио.
     """
@@ -107,3 +107,14 @@ def resample_wav(self, audio: np.ndarray, audio_sr: int, target_sr: int) -> np.n
     num_original_samples = len(audio)
     num_target_samples = int(num_original_samples * (int(target_sr) / int(audio_sr)))
     return resample(audio, num_target_samples)
+    
+def normalize_peak_numpy(data: np.ndarray, coefficient: float = 1.0) -> np.ndarray:
+    """
+    Нормализует аудио (NumPy) по максимальному пику.
+    """
+    # Исправлено: np.max ищет только положительный максимум.
+    # Для аудио нужно np.abs(data).max(), чтобы учесть громкие отрицательные значения.
+    max_value = np.max(np.abs(data))
+    if max_value > 0:
+        data = data / max_value
+    return data * coefficient

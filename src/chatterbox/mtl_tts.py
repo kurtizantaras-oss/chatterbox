@@ -21,7 +21,7 @@ from .models.tokenizers import MTLTokenizer
 from .models.voice_encoder import VoiceEncoder
 from .models.t3.modules.cond_enc import T3Cond
 
-from .audiofilter import resample_wav, normalize_peak_numpy, trim_audio_with_pauses
+from .audiofilter import resample_wav, normalize_peak_numpy, trim_audio_with_pauses, normalize_peak_numpy
 
 REPO_ID = "ResembleAI/chatterbox"
 
@@ -84,11 +84,6 @@ def punc_norm(text: str) -> str:
         ("”", "\""),
         ("‘", "'"),
         ("’", "'"),
-        ##########################
-        #delete when added wariants to dataset
-        ("!", "."),
-        ("?", "."),
-        ##########################
     ]
     for old_char_sequence, new_char in punc_to_replace:
         text = text.replace(old_char_sequence, new_char)
@@ -341,6 +336,7 @@ class ChatterboxMultilingualTTS:
         text = punc_norm(text)
         texts = split_text_smart(text, max_len=350)
         segments = []
+        add_sylense = False
         for text in texts:
             
             text_tokens = self.tokenizer.text_to_tokens(text, language_id=language_id.lower() if language_id else None).to(self.device)
@@ -372,8 +368,11 @@ class ChatterboxMultilingualTTS:
                 segment = wav.squeeze(0).detach().cpu().numpy()
                 
                 #########################
-                add_sylense = True
+                segment = resample_wav (segment, self.sr, 16000)
+                segment = normalize_peak_numpy(segment, 0.95)
                 segment = trim_audio_with_pauses(segment, add_sylense) 
+                segment = resample_wav (segment, 16000, self.sr)
+                add_sylense = True
                 #########################
                 
                 watermarked_wav = self.watermarker.apply_watermark(segment, sample_rate=self.sr)
@@ -402,13 +401,3 @@ def set_seed(seed: int):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         
-def normalize_peak_numpy(self, data: np.ndarray, coefficient: float = 1.0) -> np.ndarray:
-    """
-    Нормализует аудио (NumPy) по максимальному пику.
-    """
-    # Исправлено: np.max ищет только положительный максимум.
-    # Для аудио нужно np.abs(data).max(), чтобы учесть громкие отрицательные значения.
-    max_value = np.max(np.abs(data))
-    if max_value > 0:
-        data = data / max_value
-    return data * coefficient
