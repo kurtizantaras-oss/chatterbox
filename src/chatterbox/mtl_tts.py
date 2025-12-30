@@ -1,10 +1,14 @@
 from dataclasses import dataclass
 from pathlib import Path
 import os
-
+import random
 import librosa
 import torch
 import perth
+import re
+import numpy as np
+import pyloudnorm as ln
+import math
 import torch.nn.functional as F
 from safetensors.torch import load_file as load_safetensors
 from huggingface_hub import snapshot_download
@@ -17,11 +21,14 @@ from .models.tokenizers import MTLTokenizer
 from .models.voice_encoder import VoiceEncoder
 from .models.t3.modules.cond_enc import T3Cond
 
+from .audiofilter import resample_wav, normalize_peak_numpy, trim_audio_with_pauses
 
 REPO_ID = "ResembleAI/chatterbox"
 
 # Supported languages for the multilingual model
 SUPPORTED_LANGUAGES = {
+  "et": "Estonian",
+  "lv": "Latvian",
   "ar": "Arabic",
   "da": "Danish",
   "de": "German",
@@ -34,7 +41,6 @@ SUPPORTED_LANGUAGES = {
   "hi": "Hindi",
   "it": "Italian",
   "ja": "Japanese",
-  "ko": "Korean",
   "ms": "Malay",
   "nl": "Dutch",
   "no": "Norwegian",
@@ -45,6 +51,7 @@ SUPPORTED_LANGUAGES = {
   "sw": "Swahili",
   "tr": "Turkish",
   "zh": "Chinese",
+  "uk_UA": "Ukranian",
 }
 
 
@@ -57,11 +64,11 @@ def punc_norm(text: str) -> str:
         return "You need to add some text for me to talk."
 
     # Capitalise first letter
-    if text[0].islower():
-        text = text[0].upper() + text[1:]
+    #if text[0].islower():
+    #    text = text[0].upper() + text[1:]
 
     # Remove multiple space chars
-    text = " ".join(text.split())
+    text = text.lower()
 
     # Replace uncommon/llm punc
     punc_to_replace = [
@@ -77,17 +84,80 @@ def punc_norm(text: str) -> str:
         ("”", "\""),
         ("‘", "'"),
         ("’", "'"),
+        ##########################
+        #delete when added wariants to dataset
+        ("!", "."),
+        ("?", "."),
+        ##########################
     ]
     for old_char_sequence, new_char in punc_to_replace:
         text = text.replace(old_char_sequence, new_char)
 
     # Add full stop if no ending punc
     text = text.rstrip(" ")
-    sentence_enders = {".", "!", "?", "-", ",","、","，","。","？","！"}
+    sentence_enders = {".", "!", "?", "、","，","。","？","！"}
     if not any(text.endswith(p) for p in sentence_enders):
         text += "."
 
     return text
+
+
+
+def split_text_smart(text, max_len=300):
+    
+    # 1. Сначала бьем на предложения (по точкам, знакам ! и ?)
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    
+    result = []
+    current_chunk = ""
+
+    for sentence in sentences:
+        # Если предложение влезает в текущий блок
+        if len(current_chunk) + len(sentence) + 1 <= max_len:
+            current_chunk = (current_chunk + " " + sentence).strip()
+        else:
+            # Если в текущем блоке что-то было, сохраняем его
+            if current_chunk:
+                result.append(current_chunk)
+                current_chunk = ""
+
+            # Если само предложение > 300 символов, дробим его по запятым/тире
+            if len(sentence) > max_len:
+                # Регулярка: ищем запятые, точки с запятой или тире (с пробелом после них)
+                # Используем захватывающие скобки (), чтобы разделители не удалялись
+                sub_parts = re.split(r'([,;—\-] )', sentence)
+                
+                temp_sub_chunk = ""
+                for part in sub_parts:
+                    if len(temp_sub_chunk) + len(part) <= max_len:
+                        temp_sub_chunk += part
+                    else:
+                        # Если даже часть до запятой слишком длинная, бьем по пробелам
+                        if len(temp_sub_chunk) > 0:
+                            result.append(temp_sub_chunk.strip())
+                            temp_sub_chunk = ""
+                        
+                        if len(part) > max_len:
+                            # Крайний случай: дробим просто по словам
+                            words = part.split(' ')
+                            for word in words:
+                                if len(temp_sub_chunk) + len(word) + 1 <= max_len:
+                                    temp_sub_chunk = (temp_sub_chunk + " " + word).strip()
+                                else:
+                                    result.append(temp_sub_chunk)
+                                    temp_sub_chunk = word
+                        else:
+                            temp_sub_chunk = part
+                
+                current_chunk = temp_sub_chunk.strip()
+            else:
+                current_chunk = sentence
+
+    if current_chunk:
+        result.append(current_chunk)
+        
+    return result
+
 
 
 @dataclass
@@ -203,9 +273,12 @@ class ChatterboxMultilingualTTS:
         )
         return cls.from_local(ckpt_dir, device)
     
-    def prepare_conditionals(self, wav_fpath, exaggeration=0.5):
+       
+    def prepare_conditionals(self, wav_fpath, exaggeration=0.5, norm_loudness=True):
         ## Load reference wav
         s3gen_ref_wav, _sr = librosa.load(wav_fpath, sr=S3GEN_SR)
+        
+        assert len(s3gen_ref_wav) / _sr > 5.0, "Audio prompt must be longer than 5 seconds!"
 
         ref_16k_wav = librosa.resample(s3gen_ref_wav, orig_sr=S3GEN_SR, target_sr=S3_SR)
 
@@ -243,7 +316,7 @@ class ChatterboxMultilingualTTS:
         top_p=1.0,
     ):
         # Validate language_id
-        if language_id and language_id.lower() not in SUPPORTED_LANGUAGES:
+        if language_id and language_id not in SUPPORTED_LANGUAGES:
             supported_langs = ", ".join(SUPPORTED_LANGUAGES.keys())
             raise ValueError(
                 f"Unsupported language_id '{language_id}'. "
@@ -266,36 +339,76 @@ class ChatterboxMultilingualTTS:
 
         # Norm and tokenize text
         text = punc_norm(text)
-        text_tokens = self.tokenizer.text_to_tokens(text, language_id=language_id.lower() if language_id else None).to(self.device)
-        text_tokens = torch.cat([text_tokens, text_tokens], dim=0)  # Need two seqs for CFG
+        texts = split_text_smart(text, max_len=350)
+        segments = []
+        for text in texts:
+            
+            text_tokens = self.tokenizer.text_to_tokens(text, language_id=language_id.lower() if language_id else None).to(self.device)
+            text_tokens = torch.cat([text_tokens, text_tokens], dim=0)  # Need two seqs for CFG
+            sot = self.t3.hp.start_text_token
+            eot = self.t3.hp.stop_text_token
+            text_tokens = F.pad(text_tokens, (1, 0), value=sot)
+            text_tokens = F.pad(text_tokens, (0, 1), value=eot)
+            with torch.inference_mode():
+                speech_tokens = self.t3.inference(
+                    t3_cond=self.conds.t3,
+                    text_tokens=text_tokens,
+                    max_new_tokens=1000,  # TODO: use the value in config
+                    temperature=temperature,
+                    cfg_weight=cfg_weight,
+                    repetition_penalty=repetition_penalty,
+                    min_p=min_p,
+                    top_p=top_p,
+                )
+                # Extract only the conditional batch.
+                speech_tokens = speech_tokens[0]
+                # TODO: output becomes 1D
+                speech_tokens = drop_invalid_tokens(speech_tokens)
+                speech_tokens = speech_tokens.to(self.device)
+                wav, _ = self.s3gen.inference(
+                    speech_tokens=speech_tokens,
+                    ref_dict=self.conds.gen,
+                )
+                segment = wav.squeeze(0).detach().cpu().numpy()
+                
+                #########################
+                add_sylense = True
+                segment = trim_audio_with_pauses(segment, add_sylense) 
+                #########################
+                
+                watermarked_wav = self.watermarker.apply_watermark(segment, sample_rate=self.sr)
 
-        sot = self.t3.hp.start_text_token
-        eot = self.t3.hp.stop_text_token
-        text_tokens = F.pad(text_tokens, (1, 0), value=sot)
-        text_tokens = F.pad(text_tokens, (0, 1), value=eot)
+        segments.append(watermarked_wav)
+        audio = np.concatenate(segments, axis=0)
 
-        with torch.inference_mode():
-            speech_tokens = self.t3.inference(
-                t3_cond=self.conds.t3,
-                text_tokens=text_tokens,
-                max_new_tokens=1000,  # TODO: use the value in config
-                temperature=temperature,
-                cfg_weight=cfg_weight,
-                repetition_penalty=repetition_penalty,
-                min_p=min_p,
-                top_p=top_p,
-            )
-            # Extract only the conditional batch.
-            speech_tokens = speech_tokens[0]
+        return audio, self.sr
+        #return torch.from_numpy(audio).unsqueeze(0)
+        
+def set_seed(seed: int):
+    if seed < 0:
+        seed = -seed
+    if seed > (1 << 31):
+        seed = 1 << 31
 
-            # TODO: output becomes 1D
-            speech_tokens = drop_invalid_tokens(speech_tokens)
-            speech_tokens = speech_tokens.to(self.device)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
-            wav, _ = self.s3gen.inference(
-                speech_tokens=speech_tokens,
-                ref_dict=self.conds.gen,
-            )
-            wav = wav.squeeze(0).detach().cpu().numpy()
-            watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
-        return torch.from_numpy(watermarked_wav).unsqueeze(0)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+    if torch.backends.cudnn.is_available():
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        
+def normalize_peak_numpy(self, data: np.ndarray, coefficient: float = 1.0) -> np.ndarray:
+    """
+    Нормализует аудио (NumPy) по максимальному пику.
+    """
+    # Исправлено: np.max ищет только положительный максимум.
+    # Для аудио нужно np.abs(data).max(), чтобы учесть громкие отрицательные значения.
+    max_value = np.max(np.abs(data))
+    if max_value > 0:
+        data = data / max_value
+    return data * coefficient

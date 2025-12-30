@@ -6,7 +6,7 @@ from pathlib import Path
 from unicodedata import category, normalize
 from tokenizers import Tokenizer
 from huggingface_hub import hf_hub_download
-
+from .dictionary.lv_text import normalize as lv_normalize
 
 # Special tokens
 SOT = "[START]"
@@ -60,7 +60,7 @@ REPO_ID = "ResembleAI/chatterbox"
 _kakasi = None
 _dicta = None
 _russian_stresser = None
-
+_ukranian_stresser = None
 
 def is_kanji(c: str) -> bool:
     """Check if character is kanji."""
@@ -252,6 +252,24 @@ def add_russian_stress(text: str) -> str:
         logger.warning(f"Russian stress labeling failed: {e}")
         return text
 
+def add_ukranian_stress(text: str) -> str:
+    """Russian text normalization: adds stress marks to Russian text."""
+    global _ukranian_stresser
+    
+    try:
+        if _ukranian_stresser is None:
+            import ukrainian_accentor as accentor
+            _ukranian_stresser = accentor
+        
+        return _ukranian_stresser.process(text, mode='stress')
+        
+    except ImportError:
+        logger.warning("ukranian_text_stresser not available - Ukranian stress labeling skipped")
+        return text
+    except Exception as e:
+        logger.warning(f"Ukranian stress labeling failed: {e}")
+        return text
+        
 
 class MTLTokenizer:
     def __init__(self, vocab_file_path):
@@ -296,10 +314,15 @@ class MTLTokenizer:
             txt = korean_normalize(txt)
         elif language_id == 'ru':
             txt = add_russian_stress(txt)
-        
+        elif language_id == 'uk_UA':
+            txt = add_ukranian_stress(txt)
+        elif language_id == 'lv':
+            txt = lv_normalize(txt)
+
+            
         # Prepend language token
         if language_id:
-            txt = f"[{language_id.lower()}]{txt}"
+            txt = f"[{language_id}]{txt}"
         
         txt = txt.replace(' ', SPACE)
         return self.tokenizer.encode(txt).ids

@@ -20,7 +20,6 @@ from .utils.mask import add_optional_chunk_mask
 from .matcha.decoder import SinusoidalPosEmb, Block1D, ResnetBlock1D, Downsample1D, \
     TimestepEmbedding, Upsample1D
 from .matcha.transformer import BasicTransformerBlock
-from .utils.intmeanflow import get_intmeanflow_time_mixer
 
 
 def mask_to_bias(mask: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
@@ -96,6 +95,8 @@ class CausalConv1d(torch.nn.Conv1d):
         x = F.pad(x, self.causal_padding)
         x = super(CausalConv1d, self).forward(x)
         return x
+
+
 class ConditionalDecoder(nn.Module):
     def __init__(
         self,
@@ -109,7 +110,6 @@ class ConditionalDecoder(nn.Module):
         num_mid_blocks=12,
         num_heads=8,
         act_fn="gelu",
-        meanflow=False,
     ):
         """
         This decoder requires an input with the same shape of the target. So, if your text content
@@ -117,7 +117,6 @@ class ConditionalDecoder(nn.Module):
         """
         super().__init__()
         channels = tuple(channels)
-        self.meanflow = meanflow
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.causal = causal
@@ -128,7 +127,6 @@ class ConditionalDecoder(nn.Module):
             time_embed_dim=time_embed_dim,
             act_fn="silu",
         )
-
         self.down_blocks = nn.ModuleList([])
         self.mid_blocks = nn.ModuleList([])
         self.up_blocks = nn.ModuleList([])
@@ -217,14 +215,6 @@ class ConditionalDecoder(nn.Module):
         self.final_block = CausalBlock1D(channels[-1], channels[-1]) if self.causal else Block1D(channels[-1], channels[-1])
         self.final_proj = nn.Conv1d(channels[-1], self.out_channels, 1)
         self.initialize_weights()
-        self.time_embed_mixer = None
-        if self.meanflow:
-            self.time_embed_mixer = get_intmeanflow_time_mixer(time_embed_dim)
-
-
-    @property
-    def dtype(self):
-        return self.final_proj.weight.dtype
 
     def initialize_weights(self):
         for m in self.modules():
@@ -240,16 +230,15 @@ class ConditionalDecoder(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
-    def forward(self, x, mask, mu, t, spks=None, cond=None, r=None):
+    def forward(self, x, mask, mu, t, spks=None, cond=None):
         """Forward pass of the UNet1DConditional model.
 
         Args:
-            x: (B, 80, T)
-            mask (_type_)
+            x (torch.Tensor): shape (batch_size, in_channels, time)
+            mask (_type_): shape (batch_size, 1, time)
             t (_type_): shape (batch_size)
-            spks (_type_, optional) Defaults to None.
-            cond (_type_, optional)
-            r: end time for meanflow mode (shape (1,) tensor)
+            spks (_type_, optional): shape: (batch_size, condition_channels). Defaults to None.
+            cond (_type_, optional): placeholder for future use. Defaults to None.
 
         Raises:
             ValueError: _description_
@@ -258,14 +247,9 @@ class ConditionalDecoder(nn.Module):
         Returns:
             _type_: _description_
         """
+
         t = self.time_embeddings(t).to(t.dtype)
         t = self.time_mlp(t)
-
-        if self.meanflow:
-            r = self.time_embeddings(r).to(t.dtype)
-            r = self.time_mlp(r)
-            concat_embed = torch.cat([t, r], dim=1)
-            t = self.time_embed_mixer(concat_embed)
 
         x = pack([x, mu], "b * t")[0]
 
