@@ -84,6 +84,10 @@ def punc_norm(text: str) -> str:
         ("”", "\""),
         ("‘", "'"),
         ("’", "'"),
+        ###################
+        ("!", "."),
+        ("?", "."),
+        ###################
     ]
     for old_char_sequence, new_char in punc_to_replace:
         text = text.replace(old_char_sequence, new_char)
@@ -368,10 +372,7 @@ class ChatterboxMultilingualTTS:
                 segment = wav.squeeze(0).detach().cpu().numpy()
                 
                 #########################
-                segment = resample_wav (segment, self.sr, 16000)
-                segment = normalize_peak_numpy(segment, 0.95)
-                segment = trim_audio_with_pauses(segment, add_sylense) 
-                segment = resample_wav (segment, 16000, self.sr)
+                segment = trim_audio_with_pauses(segment, add_sylense, self.sr) 
                 add_sylense = True
                 #########################
                 

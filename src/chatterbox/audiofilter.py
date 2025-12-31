@@ -9,7 +9,7 @@ modelvad, utilsvad = torch.hub.load(repo_or_dir='snakers4/silero-vad',
                                               force_onnx_cpu=True,   # Optional: Force ONNX Runtime to use CPU
                                               force_reload=False)
 
-def trim_audio_with_pauses(wav_numpy, add_sylense=True, sr=16000):
+def trim_audio_with_pauses(wav_numpy, add_sylense=True,  wav_sr=44100, vad_sr=16000):
     """
     Обнаруживает речь в аудиофайле с помощью Silero VAD, обрезает тишину
     и добавляет случайные паузы в начале и конце.
@@ -35,19 +35,20 @@ def trim_audio_with_pauses(wav_numpy, add_sylense=True, sr=16000):
 
     # 3. Подготовка данных для VAD: Преобразование NumPy в PyTorch Tensor
     # Silero VAD ожидает входные данные в формате PyTorch Tensor.
-    wav_tensor = torch.from_numpy(wav_numpy)
+    wav_tensor = torch.from_numpy(resample_wav(wav_numpy, wav_sr, vad_sr))
 
     # 4. Обнаружение временных меток речи
     print("Try to detect speech...")
     speech_timestamps = get_speech_timestamps(wav_tensor,
                                               modelvad,
-                                              sampling_rate=sr,
+                                              sampling_rate=vad_sr,
                                               # Порог активности голоса
-                                              threshold=0.6,
+                                              threshold=0.5,
                                               # Минимальная длительность речи, чтобы считаться активной
-                                              min_speech_duration_ms=250,
+                                              min_speech_duration_ms=150,
                                               # Минимальная длительность тишины между сегментами речи
                                               min_silence_duration_ms=50,
+                                              return_seconds=True,
                                               )
 
     # 5. Проверка результата VAD
@@ -64,7 +65,7 @@ def trim_audio_with_pauses(wav_numpy, add_sylense=True, sr=16000):
 
     # 7. Обрезка основного сегмента речи
     # Извлечение всех сэмплов от начала первого до конца последнего сегмента речи.
-    speech_segment_numpy = wav_numpy[start_sample:end_sample]
+    speech_segment_numpy = wav_numpy[int(wav_sr * start_sample):int(wav_sr * end_sample)]
     
     if add_sylense:
         # 8. Генерация случайной паузы
@@ -108,13 +109,3 @@ def resample_wav(audio: np.ndarray, audio_sr: int, target_sr: int=16000) -> np.n
     num_target_samples = int(num_original_samples * (int(target_sr) / int(audio_sr)))
     return resample(audio, num_target_samples)
     
-def normalize_peak_numpy(data: np.ndarray, coefficient: float = 1.0) -> np.ndarray:
-    """
-    Нормализует аудио (NumPy) по максимальному пику.
-    """
-    # Исправлено: np.max ищет только положительный максимум.
-    # Для аудио нужно np.abs(data).max(), чтобы учесть громкие отрицательные значения.
-    max_value = np.max(np.abs(data))
-    if max_value > 0:
-        data = data / max_value
-    return data * coefficient
