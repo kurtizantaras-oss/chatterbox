@@ -12,6 +12,8 @@ import math
 import torch.nn.functional as F
 from safetensors.torch import load_file as load_safetensors
 from huggingface_hub import snapshot_download
+import gc
+
 
 from .models.t3 import T3
 from .models.t3.modules.t3_config import T3Config
@@ -64,11 +66,11 @@ def punc_norm(text: str) -> str:
         return "You need to add some text for me to talk."
 
     # Capitalise first letter
-    #if text[0].islower():
-    #    text = text[0].upper() + text[1:]
+    if text[0].islower():
+        text = text[0].upper() + text[1:]
 
     # Remove multiple space chars
-    text = text.lower()
+    #text = text.lower()
 
     # Replace uncommon/llm punc
     punc_to_replace = [
@@ -201,7 +203,7 @@ class Conditionals:
 
 class ChatterboxMultilingualTTS:
     ENC_COND_LEN = 6 * S3_SR
-    DEC_COND_LEN = 10 * S3GEN_SR
+    DEC_COND_LEN = 30 * S3GEN_SR
 
     def __init__(
         self,
@@ -272,12 +274,51 @@ class ChatterboxMultilingualTTS:
         )
         return cls.from_local(ckpt_dir, device)
     
-       
+
+    def norm_loudness(self, wav, sr, target_lufs=-27):
+        try:
+            # Переконуємося, що працюємо з numpy для pyloudnorm
+            is_torch = isinstance(wav, torch.Tensor)
+            wav_np = wav.detach().cpu().numpy() if is_torch else wav
+
+            # Вимірюємо гучність
+            meter = ln.Meter(sr)
+            loudness = meter.integrated_loudness(wav_np)
+            
+            # Перевірка на тишу (loudness < -70 LUFS зазвичай вважається тишею)
+            if loudness < -70:
+                return wav
+
+            gain_db = target_lufs - loudness
+            gain_linear = 10.0 ** (gain_db / 20.0)
+            
+            if math.isfinite(gain_linear) and gain_linear > 0.0:
+                wav_np = wav_np * gain_linear
+                
+                # Додаємо м'який лімітер (Peak Clipping Prevention)
+                max_val = np.abs(wav_np).max()
+                if max_val > 0.99:
+                    wav_np = wav_np / max_val * 0.99
+                    
+                # Повертаємо початковий тип
+                if is_torch:
+                    return torch.from_numpy(wav_np).to(wav.device).to(wav.dtype)
+                return wav_np.astype(wav.dtype)
+                
+        except Exception as e:
+            print(f"Warning: Error in norm_loudness, skipping: {e}")
+
+        return wav
+
+    
     def prepare_conditionals(self, wav_fpath, exaggeration=0.5, norm_loudness=True):
         ## Load reference wav
-        s3gen_ref_wav, _sr = librosa.load(wav_fpath, sr=S3GEN_SR)
+        s3gen_ref_wav, _sr = librosa.load(wav_fpath)
         
         assert len(s3gen_ref_wav) / _sr > 5.0, "Audio prompt must be longer than 5 seconds!"
+        
+        if norm_loudness:
+            s3gen_ref_wav = self.norm_loudness(s3gen_ref_wav, _sr)
 
         ref_16k_wav = librosa.resample(s3gen_ref_wav, orig_sr=S3GEN_SR, target_sr=S3_SR)
 
@@ -341,9 +382,12 @@ class ChatterboxMultilingualTTS:
         texts = split_text_smart(text, max_len=350)
         segments = []
         add_sylense = False
+        #set_seed(1)
         for text in texts:
             
             text_tokens = self.tokenizer.text_to_tokens(text, language_id=language_id.lower() if language_id else None).to(self.device)
+            #print (text_tokens)
+            #print (self.tokenizer.decode(text_tokens[0]))
             text_tokens = torch.cat([text_tokens, text_tokens], dim=0)  # Need two seqs for CFG
             sot = self.t3.hp.start_text_token
             eot = self.t3.hp.stop_text_token
@@ -381,8 +425,16 @@ class ChatterboxMultilingualTTS:
         segments.append(watermarked_wav)
         audio = np.concatenate(segments, axis=0)
 
+        #####################
+        # Clean up the memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
+        #######################
         return audio, self.sr
         #return torch.from_numpy(audio).unsqueeze(0)
+        
+
         
 def set_seed(seed: int):
     if seed < 0:

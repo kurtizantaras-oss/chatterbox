@@ -295,12 +295,12 @@ class MTLTokenizer:
         
         return preprocessed_text
 
-    def text_to_tokens(self, text: str, language_id: str = None, lowercase: bool = True, nfkd_normalize: bool = True):
+    def text_to_tokens(self, text: str, language_id: str = None, lowercase: bool = False, nfkd_normalize: bool = True):
         text_tokens = self.encode(text, language_id=language_id, lowercase=lowercase, nfkd_normalize=nfkd_normalize)
         text_tokens = torch.IntTensor(text_tokens).unsqueeze(0)
         return text_tokens
 
-    def encode(self, txt: str, language_id: str = None, lowercase: bool = True, nfkd_normalize: bool = True):
+    def encode(self, txt: str, language_id: str = None, lowercase: bool = False, nfkd_normalize: bool = True):
         txt = self.preprocess_text(txt, language_id=language_id, lowercase=lowercase, nfkd_normalize=nfkd_normalize)
         
         # Language-specific text processing
@@ -317,7 +317,7 @@ class MTLTokenizer:
         elif language_id == 'uk_UA':
             txt = add_ukranian_stress(txt)
         elif language_id == 'lv':
-            txt = lv_normalize(txt)
+            txt = lv_normalize(txt).lower()
 
             
         # Prepend language token

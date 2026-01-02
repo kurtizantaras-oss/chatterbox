@@ -203,6 +203,7 @@ class ChatterboxTurboTTS:
 
     def norm_loudness(self, wav, sr, target_lufs=-27):
         try:
+            print('m')
             meter = ln.Meter(sr)
             loudness = meter.integrated_loudness(wav)
             gain_db = target_lufs - loudness

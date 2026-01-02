@@ -38,7 +38,7 @@ def normalize(raw_text):
     text = re.sub(r'(\d+),(\d+)', r'\1.\2 ', text) # replace comma to dot  in digitals 
     text = re.sub(r"[„”\"'“\(\)\{\}]+", ' ', text) # clear all simbols
     text = re.sub(r"([a-zA-ZāčēģīķļņošūžĀČĒĢĪĶĻŅŌŠŪŽ])\s*([,.:;!?])\s*([a-zA-ZāčēģīķļņošūžĀČĒĢĪĶĻŅŌŠŪŽ])", r"\1\2 \3", text) # замена формата буква,буква на буква,(пробел)буква
-    print(text)
+    
     # replace by dictionary
     with open(BASE_DIR+'/lv-dictionary.txt', 'r') as file:
         dictionary = {}
@@ -49,10 +49,8 @@ def normalize(raw_text):
     text = re.sub(r"(\d+):(\d+)[.-](\d+)", r"\1. nodaļas \2. - \3. rindkopa", text) # овучка глава - пукнт - 10:8-10
     text = re.sub(r"(\d+):(\d+)", r"\1. nodaļas \2. rindkopa", text) # овучка глава - пукнт - 10:8
     text = re.sub(r"(\d+)(\.*\s*)gs\.", r"\1\2 gadsimtam ", text) # 4.gs. or 4. gs.
-
-    #text = re.sub(r"[.!?]\s*[.!?]", ". ", text) # replace dot with spaces
     text = re.sub(r"\s+", " ", text) # replace spaces
-    norm_text = text.lower().strip()
+    norm_text = text
 
     
     return norm_text
