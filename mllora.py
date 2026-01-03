@@ -772,7 +772,7 @@ def main():
     # Load Chatterbox model
     print("Loading Chatterbox TTS model...")
     try:
-        model = ChatterboxMultilingualTTS.from_local("./models/trained_model", DEVICE)
+        model = ChatterboxMultilingualTTS.from_local("./models/original_model", DEVICE)
         if hasattr(model, 'to') and str(model.device) != DEVICE:
             model.to(DEVICE)
         print(f"model loaded successfully. Internal device: {getattr(model, 'device', 'N/A')}")
