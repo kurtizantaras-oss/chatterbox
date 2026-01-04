@@ -42,11 +42,11 @@ from safetensors.torch import save_file
 # Hardcoded configuration
 AUDIO_DATA_DIR = "/mnt/DISK1/data"
 BATCH_SIZE = 4
-EPOCHS = 10
+EPOCHS = 1
 LEARNING_RATE = 2e-5  
 WARMUP_STEPS = 500 
 MAX_AUDIO_LENGTH = 30.0  
-MIN_AUDIO_LENGTH = 0.5
+MIN_AUDIO_LENGTH = 1
 LORA_RANK = 32  
 LORA_ALPHA = 64  
 LORA_DROPOUT = 0.05  
@@ -438,15 +438,17 @@ class TTSDataset(Dataset):
         text = punc_norm(sample.transcript)
         if len(text) > self.max_text_length:
             text = text[:self.max_text_length]
-        
+        text_tokens = self.tokenizer.text_to_tokens(text, language_id=sample.language_id).squeeze(0)
+            
         return {
             'audio': torch.FloatTensor(audio),
             'audio_16k': torch.FloatTensor(audio_16k),
-            'text': text,
+            'text_tokens': text_tokens,
             'audio_path': str(sample.audio_path),
             'language_id': sample.language_id,
         }
-
+    
+    
 
 def prepare_batch_conditionals(
     batch: Dict[str, torch.Tensor],
@@ -470,8 +472,8 @@ def prepare_batch_conditionals(
             wav_16k_np = audio_16k_cpu[i].numpy() 
             
             # Padding logic for min length
-            if len(wav_16k_np) < S3_SR:  # Less than 1 second (S3_SR = 16000)
-                wav_16k_np = np.pad(wav_16k_np, (0, S3_SR - len(wav_16k_np)), mode='reflect')
+            if len(wav_16k_np) < S3_SR * MIN_AUDIO_LENGTH:  # Less than MIN_AUDIO_LENGTH second (S3_SR = 16000)
+                wav_16k_np = np.pad(wav_16k_np, (0, S3_SR * MIN_AUDIO_LENGTH - len(wav_16k_np)), mode='reflect')
             
             # Call VE (вероятно, требует NumPy-массивов)
             utt_embeds = ve.embeds_from_wavs([wav_16k_np],
@@ -531,8 +533,8 @@ def prepare_batch_conditionals(
                 ref_16k = wav_16k_np[:model.ENC_COND_LEN]
                 
                 # Padding logic
-                if len(ref_16k) < S3_SR // 2:  # At least 0.5 seconds
-                    ref_16k = np.pad(ref_16k, (0, S3_SR // 2 - len(ref_16k)), mode='reflect')
+                if len(ref_16k) < S3_SR * MIN_AUDIO_LENGTH // 2:  # At least 0.5 seconds
+                    ref_16k = np.pad(ref_16k, (0, S3_SR * MIN_AUDIO_LENGTH // 2 - len(ref_16k)), mode='reflect')
                 
                 # Tokenizer forward (вероятно, требует NumPy)
                 tokens, _ = t3_tokzr.forward([ref_16k], max_len=plen)
@@ -569,29 +571,11 @@ def compute_loss(
 ) -> torch.Tensor:
     batch_size = batch['audio'].size(0)
     device = model.device
-
-    # ── text → tokens ────────────────────────────────────────────────────────────
-    text_tokens_list = []
-    for i in range(batch_size):
-        text = batch['text'][i]
-        lang = batch['language_id'][i] # БЕРЕМ ЯЗЫК ИЗ БАТЧА
-        tokens = model.tokenizer.text_to_tokens(text, language_id=lang).to(device)
-        #print (tokens)
-        text_tokens_list.append(tokens)
-
-    # Pad text tokens to same length
-    max_text_len = max(t.size(-1) for t in text_tokens_list)
-    text_tokens_padded = []
-    for t in text_tokens_list:
-        pad_amount = max_text_len - t.size(-1)
-        if pad_amount > 0:
-            padded = F.pad(t, (0, pad_amount), value=0)
-        else:
-            padded = t
-        text_tokens_padded.append(padded)
     
-    text_tokens = torch.cat(text_tokens_padded, dim=0)
-
+    # 1. Просто переносим готовые токены на GPU
+    text_tokens = batch['text_tokens'].to(device, non_blocking=True)
+    
+    
     # Add start/stop tokens if needed
     sot = model.t3.hp.start_text_token
     eot = model.t3.hp.stop_text_token
@@ -604,8 +588,7 @@ def compute_loss(
 
     # ── speech → tokens ─────────────────────────────────────────────────────────
     s3_tokzr = model.s3gen.tokenizer
-    MAX_TOKENIZER_SEC = 30
-    MAX_TOKENIZER_SAMPLES = MAX_TOKENIZER_SEC * S3_SR
+    MAX_TOKENIZER_SAMPLES = MAX_AUDIO_LENGTH * S3_SR
 
     # 💥 ОПТИМИЗАЦИЯ: Извлекаем тензор 'audio_16k' на CPU ОДИН РАЗ
     audio_16k_cpu = batch['audio_16k'].cpu()
@@ -618,10 +601,10 @@ def compute_loss(
         # Truncate if too long
         if len(audio_16k_np) > MAX_TOKENIZER_SAMPLES:
             audio_16k_np = audio_16k_np[:MAX_TOKENIZER_SAMPLES]
-        
+
         # Ensure minimum length
-        if len(audio_16k_np) < S3_SR:  # Less than 1 second
-            pad_amount = S3_SR - len(audio_16k_np)
+        if len(audio_16k_np) < S3_SR * MIN_AUDIO_LENGTH:  # Less than MIN_AUDIO_LENGTH second
+            pad_amount = S3_SR * MIN_AUDIO_LENGTH - len(audio_16k_np)
             audio_16k_np = np.pad(audio_16k_np, (0, pad_amount), mode='constant')
         
         # Tokenize speech
@@ -635,7 +618,8 @@ def compute_loss(
             tokens = tokens.unsqueeze(0)
             
         target_tokens_list.append(tokens)
-
+    
+    
     # Pad speech tokens to same length
     max_speech_len = max(t.size(-1) for t in target_tokens_list)
     target_tokens_padded = []
@@ -648,7 +632,7 @@ def compute_loss(
         target_tokens_padded.append(padded)
     
     # 💥 ИЗМЕНЕНИЕ: Перемещаем на GPU только после финального паддинга
-    target_tokens = torch.cat(target_tokens_padded, dim=0).to(device)
+    target_tokens = torch.cat(target_tokens_padded, dim=0).to(device, non_blocking=True)
 
     # Print shapes for debugging
     #print(f"Text tokens shape: {text_tokens.shape}")
@@ -670,6 +654,7 @@ def compute_loss(
         ) if t3_cond.emotion_adv is not None else None,
     )
 
+    
     # ── forward pass ─────────────────────────────────────────────────────────────
     # Use speech tokens for input (teacher forcing), excluding the last token
     input_speech_tokens = target_tokens_doubled[:, :-1]
@@ -685,12 +670,8 @@ def compute_loss(
     #print(f"Conditioning length: {len_cond}")
 
     # Forward through transformer
-    if DEVICE == 'cuda':
-        with torch.cuda.amp.autocast():
-            hidden_states = model.t3.tfmr(inputs_embeds=embeds)[0]
-    else:
+    with torch.cuda.amp.autocast():
         hidden_states = model.t3.tfmr(inputs_embeds=embeds)[0]
-
     #print(f"Hidden states shape: {hidden_states.shape}")
 
     # Extract speech logits
@@ -710,7 +691,6 @@ def compute_loss(
     
     speech_hidden = hidden_states[:, speech_start:speech_end]
     speech_logits = model.t3.speech_head(speech_hidden)
-    
     #print(f"Speech logits shape: {speech_logits.shape}")
 
     # Target tokens for loss (shifted by 1 for next-token prediction)
@@ -724,14 +704,14 @@ def compute_loss(
     target_shifted = target_shifted[:, :min_len]
     
     #print(f"Final shapes - logits: {speech_logits.shape}, targets: {target_shifted.shape}")
-
+    
     # Compute cross-entropy loss
     loss = F.cross_entropy(
         speech_logits.reshape(-1, speech_logits.size(-1)),  # (batch*seq, vocab)
         target_shifted.reshape(-1),  # (batch*seq,)
         ignore_index=-100,
     )
-    
+
     #print(f"Computed loss: {loss.item():.6f}")
 
     # Sanity checks
@@ -753,6 +733,8 @@ def main():
     """Main training function"""
     print(f"Starting Chatterbox TTS LoRA fine-tuning")
     print(f"Device: {DEVICE}")
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
     
     # Initialize metrics tracker
     metrics_tracker = MetricsTracker(save_path="training_metrics.png", update_interval=2.0)
@@ -876,6 +858,7 @@ def main():
             print("Compiling model.t3.tfmr with torch.compile...")
             # Компилируем только основной Transformer (Llama)
             model.t3.tfmr = torch.compile(model.t3.tfmr)
+            
             print("✅ Compilation successful.")
         except Exception as e:
             print(f"⚠️ torch.compile failed: {e}")
@@ -892,7 +875,7 @@ def main():
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
-        shuffle=True,
+        shuffle=False,
         num_workers=num_workers,
         collate_fn=collate_fn,
         pin_memory=True if DEVICE == 'cuda' else False
@@ -936,7 +919,7 @@ def main():
         for batch_idx, batch in enumerate(progress_bar):
             # Prepare conditionals
             t3_cond, s3gen_refs = prepare_batch_conditionals(batch, model, model.ve, model.s3gen)
-            
+
             # Compute loss
             loss = compute_loss(model, batch, t3_cond, s3gen_refs)
             loss = loss / GRADIENT_ACCUMULATION_STEPS
@@ -952,7 +935,7 @@ def main():
                 scaler.scale(loss).backward()
             else:
                 loss.backward()
-            
+
             # Update weights
             if (batch_idx + 1) % GRADIENT_ACCUMULATION_STEPS == 0:
                 # Calculate gradient norm before clipping
@@ -1003,7 +986,8 @@ def main():
                 # Save checkpoint
                 if global_step % SAVE_EVERY_N_STEPS == 0:
                     save_checkpoint(model, lora_layers, optimizer, epoch, global_step, avg_loss, CHECKPOINT_DIR)
-        
+            
+            
         # Validation
         model.t3.eval()
         val_loss = 0.0
@@ -1292,13 +1276,23 @@ def load_lora_adapter(model: ChatterboxMultilingualTTS, filepath: str, device: s
 
 
 def collate_fn(samples):
-   """Custom collate function for DataLoader"""
+   """Custom collate function для сборки батча с паддингом"""
+   # Собираем список тензоров токенов
+   text_tokens_list = [s['text_tokens'] for s in samples]
+   
+   # Делаем паддинг: (Batch, Max_Text_Len)
+   text_padded = torch.nn.utils.rnn.pad_sequence(
+       text_tokens_list, 
+       batch_first=True, 
+       padding_value=0
+   )
+   
    return {
        'audio': torch.stack([s['audio'] for s in samples]),
        'audio_16k': torch.stack([s['audio_16k'] for s in samples]),
-       'text': [s['text'] for s in samples],
-       'audio_path': [s['audio_path'] for s in samples],
+       'text_tokens': text_padded, # Готовый тензор
        'language_id': [s['language_id'] for s in samples],
+       'audio_path': [s['audio_path'] for s in samples],
    }
 
 
