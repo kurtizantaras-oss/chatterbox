@@ -45,16 +45,16 @@ BATCH_SIZE = 4
 EPOCHS = 1
 LEARNING_RATE = 2e-5  
 WARMUP_STEPS = 500 
-MAX_AUDIO_LENGTH = 30.0  
-MIN_AUDIO_LENGTH = 1
+MAX_AUDIO_LENGTH = 40.0  
+MIN_AUDIO_LENGTH = 0.5
 LORA_RANK = 32  
 LORA_ALPHA = 64  
 LORA_DROPOUT = 0.05  
-GRADIENT_ACCUMULATION_STEPS = 32
+GRADIENT_ACCUMULATION_STEPS = 16
 SAVE_EVERY_N_STEPS = 500
 CHECKPOINT_DIR = "checkpoints_lora"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-MAX_TEXT_LENGTH = 1000
+MAX_TEXT_LENGTH = 300
 VALIDATION_SPLIT = 0.01
 
 # Metrics tracking class
@@ -425,6 +425,7 @@ class TTSDataset(Dataset):
         
         # Keep original padding/trimming logic but improve it
         max_samples = int(self.max_audio_length * self.s3gen_sr)
+        
         if len(audio) > max_samples:
             audio = audio[:max_samples]
         else:
@@ -434,11 +435,10 @@ class TTSDataset(Dataset):
         # Resample for S3 tokenizer
         audio_16k = librosa.resample(audio, orig_sr=self.s3gen_sr, target_sr=self.s3_sr)
         
-        # Process text
-        text = punc_norm(sample.transcript)
-        if len(text) > self.max_text_length:
-            text = text[:self.max_text_length]
-        text_tokens = self.tokenizer.text_to_tokens(text, language_id=sample.language_id).squeeze(0)
+
+        if len(sample.transcript) > self.max_text_length:
+            sample.transcript = sample.transcript[:self.max_text_length]
+        text_tokens = self.tokenizer.text_to_tokens(sample.transcript, language_id=sample.language_id).squeeze(0)
             
         return {
             'audio': torch.FloatTensor(audio),
@@ -1121,25 +1121,22 @@ def load_audio_samples(audio_dir: str, ) -> List[AudioSample]:
        parts = audio_path.relative_to(Path(audio_dir)).parts
        lang_directory_name = parts[0]
 
-       try:
-           if audio_path_str in transcript_cache:
-               transcript = transcript_cache[audio_path_str]['transcript']
-               lang_directory_name = transcript_cache[audio_path_str]['language_id']
-               duration = transcript_cache[audio_path_str]['duration']
-               sr = transcript_cache[audio_path_str]['sample_rate']
-               #print(f"Using cached transcript for {audio_path.name}")
-           else:
+       if audio_path_str in transcript_cache:
+           transcript = transcript_cache[audio_path_str]['transcript']
+           lang_directory_name = transcript_cache[audio_path_str]['language_id']
+           duration = transcript_cache[audio_path_str]['duration']
+           sr = transcript_cache[audio_path_str]['sample_rate']
+           #print(f"Using cached transcript for {audio_path.name}")
+       else:
+           try:
                if os.path.isfile(str(audio_path)[:-4]+'.lab'):
                    # Load audio for duration check
                    audio, sr = librosa.load(audio_path, sr=None)
                    duration = len(audio) / sr
-                   
-                   # Skip if too short or too long
-                   if duration < MIN_AUDIO_LENGTH or duration > MAX_AUDIO_LENGTH:
-                       continue
-                       
                    with open(str(audio_path)[:-4]+'.lab', 'r', encoding='utf-8') as file:
-                       transcript = file.read().replace('\n','').lower()
+                       transcript = file.read().replace('\n','')     
+                       # Process text
+                       transcript = punc_norm(transcript)                       
                    # Add to cache
                    transcript_cache[audio_path_str] = {
                        'transcript': transcript,
@@ -1148,9 +1145,13 @@ def load_audio_samples(audio_dir: str, ) -> List[AudioSample]:
                        'language_id':lang_directory_name
                    }
                    cache_updated = True
-       except:
-           pass
-       
+           except:
+               pass
+               
+       # Skip if too short or too long
+       if duration <= MIN_AUDIO_LENGTH or MAX_AUDIO_LENGTH <= duration or MAX_TEXT_LENGTH <= len(transcript):
+           continue
+           
        if transcript and transcript != '':
            samples.append(AudioSample(
                audio_path=audio_path,
